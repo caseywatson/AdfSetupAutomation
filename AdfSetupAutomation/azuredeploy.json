@@ -1,0 +1,200 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2015-01-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "dataFactoryName": {
+      "type": "string",
+      "metadata": {
+        "description": "The name of the data factory that the linked services/datasets will be attached to."
+      }
+    },
+    "dataFactoryResourceGroup": {
+      "type": "string",
+      "metadata": {
+        "description": "The name of the resource group that the data factory belongs to."
+      }
+    },
+    "elasticPoolName": {
+      "type": "string",
+      "metadata": {
+        "description": "The name of the elastic pool to add the tenant database to."
+      }
+    },
+    "elasticPoolServerName": {
+      "type": "string",
+      "metadata": {
+        "description": "The name of the Azure SQL server that the elastic pool belongs to."
+      }
+    },
+    "elasticPoolResourceGroup": {
+      "type": "string",
+      "metadata": {
+        "description": "The name of the resource group that the elastic pool and Azure SQL server belongs to belongs to."
+      }
+    },
+    "elasticPoolServerAdminUserName": {
+      "type": "string",
+      "metadata": {
+        "description": "The Azure SQL server's administrator user name.'"
+      }
+    },
+    "elasticPoolServerAdminPassword": {
+      "type": "securestring",
+      "metadata": {
+        "description": "The Azure SQL server's administrator password."
+      }
+    },
+    "tenantDbCollation": {
+      "type": "string",
+      "defaultValue": "SQL_Latin1_General_CP1_CI_AS",
+      "metadata": {
+        "description": "The tenant database collation."
+      }
+    },
+    "StorageSasToken": {
+      "type": "securestring",
+      "metadata": {
+        "description": "SAS token (i.e., '?sv=...') needed to access SQL BACPAC file. See https://docs.microsoft.com/en-us/azure/storage/common/storage-sas-overview for more information."
+      }
+    },
+    "tenantId": {
+      "type": "string",
+      "metadata": {
+        "description": "The ID of the tenant for which these resources are being created."
+      }
+    }
+  },
+  "variables": {
+    "tenantUid": "[uniqueString(parameters('tenantId'))]",
+    "dbName": "[concat('DB', variables('tenantUid'))]",
+    "fullDbName": "[concat(parameters('elasticPoolServerName'), '/', variables('dbName'))]",
+    "irName": "[concat('ir', variables('tenantUid'))]",
+    "pipelineName": "[concat('pipeline-', variables('tenantUid'))]",
+    "dbSkuTier": "Standard",
+    "azLinkedServiceName": "[concat('az-sql-service-', variables('tenantUid'))]",
+    "irLinkedServiceName": "[concat('ir-sql-service-', variables('tenantUid'))]",
+    "elasticPoolId": "[resourceId('Microsoft.Sql/servers/elasticpools', parameters('elasticPoolServerName'), parameters('elasticPoolName'))]",
+    "elasticPoolServerId": "[resourceId('Microsoft.Sql/servers/', parameters('elasticPoolServerName'))]",
+    "SQLbacpacUrl": "[[TODO: Replace with the URL to your BACPAC file in blob storage.]]" // TODO: Replace with URL.
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Sql/servers/databases",
+      "name": "[variables('fullDbName')]",
+      "location": "[resourceGroup().location]",
+      "apiVersion": "2020-02-02-preview",
+      "tags": {
+        "tenantId": "[parameters('tenantId')]"
+      },
+      "sku": {
+        "name": "ElasticPool",
+        "tier": "[variables('dbSkuTier')]",
+        "capacity": 0
+      },
+      "properties": {
+        "collation": "[parameters('tenantDbCollation')]",
+        "elasticPoolId": "[variables('elasticPoolId')]"
+      },
+      "resources": [
+        {
+          "name": "Import",
+          "type": "extensions",
+          "apiVersion": "2014-04-01",
+          "dependsOn": [
+            "[resourceId('Microsoft.Sql/servers/databases', parameters('elasticPoolServerName'), variables('dbName'))]"
+          ],
+          "properties": {
+            "storageKeyType": "SharedAccessKey",
+            "storageKey": "[parameters('StorageSasToken')]",
+            "storageUri": "[variables('SQLbacpacUrl')]",
+            "administratorLogin": "[parameters('elasticPoolServerAdminUserName')]",
+            "administratorLoginPassword": "[parameters('elasticPoolServerAdminPassword')]",
+            "operationMode": "Import"
+          }
+        }
+      ]
+    },
+    {
+      "type": "Microsoft.DataFactory/factories/integrationruntimes",
+      "apiVersion": "2018-06-01",
+      "name": "[concat(parameters('dataFactoryName'), '/', variables('irName'))]",
+      "properties": {
+        "type": "SelfHosted",
+        "description": "[concat('Tenant [', parameters('tenantId'), '] self-hosted integration runtime')]"
+      }
+    },
+    {
+      "type": "Microsoft.DataFactory/factories/linkedservices",
+      "apiVersion": "2018-06-01",
+      "name": "[concat(parameters('dataFactoryName'), '/', variables('azLinkedServiceName'))]",
+      "location": "[resourceGroup().location]",
+      "dependsOn": [
+        "[variables('dbName')]"
+      ],
+      "tags": {
+        "tenantId": "[parameters('tenantId')]"
+      },
+      "properties": {
+        "type": "AzureSqlDatabase",
+        "annotations": [
+          "[concat('Tenant ', parameters('tenantId'), '/Azure SQL')]"
+        ],
+        "typeProperties": {
+          "connectionString": "[concat('integrated security=False;encrypt=True;connection timeout=30;data source=', parameters('elasticPoolServerName'), '.database.windows.net;initial catalog=', variables('dbName'), ';user id=', parameters('elasticPoolServerAdminUserName'), ';password=', parameters('elasticPoolServerAdminPassword'))]"
+        }
+      }
+    },
+    {
+      "type": "Microsoft.DataFactory/factories/pipelines",
+      "apiVersion": "2018-06-01",
+      "name": "[concat(parameters('dataFactoryName'), '/', variables('pipelineName'))]",
+      "location": "[resourceGroup().location]",
+      "dependsOn": [
+        "[variables('azLinkedServiceName')]",
+        "[variables('irName')]"
+      ],
+      "properties": {
+        "activities": [],
+        "annotations": [
+          "[concat('Tenant ', parameters('tenantId'))]"
+        ],
+        "description": "[concat('Tenant [', parameters('tenantId'), '] pipeline')]"
+      }
+    }
+    // Deploy this resource after on-prem installation of self-hosted IR.
+    // Self-hosted IR logical resource already created and authentication keys ready.
+
+    //,{
+    //  "type": "Microsoft.DataFactory/factories/linkedservices",
+    //  "apiVersion": "2018-06-01",
+    //  "name": "[concat(parameters('dataFactoryName'), '/', variables('irLinkedServiceName'))]",
+    //  "location": "[resourceGroup().location]",
+    //  "dependsOn": [
+    //    "[variables('irName')]"
+    //  ],
+    //  "tags": {
+    //    "tenantId": "[parameters('tenantId')]"
+    //  },
+    //  "properties": {
+    //    "type": "SqlServer",
+    //    "annotations": [
+    //      "[concat('Tenant ', parameters('tenantId'), '/Self-Hosted IR')]"
+    //    ],
+    //    "connectVia": {
+    //      "referenceName": "[variables('irLinkedServiceName')]",
+    //      "type": "IntegrationRuntimeReference"
+    //    },
+    //    "typeProperties": {
+    //      "connectionString": "integrated security=True"
+    //    }
+    //  }
+    //}
+  ],
+  "outputs": {
+    "ADFMI": {
+      "value": "[reference(resourceId('Microsoft.DataFactory/factories/', parameters('dataFactoryName')),'2018-06-01', 'Full').identity.principalId]",
+      "type": "string"
+    }
+  }
+}
+ 
